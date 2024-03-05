@@ -1,37 +1,27 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Most code in this file is taken from detectron2.ROIHeads, adapted for our purposes
+# All credit for unmodified code and structure goes to the original authors.  
 import inspect
 from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
 
-from detectron2.config import configurable
 from detectron2.layers import ShapeSpec
+from detectron2.config import configurable
+from detectron2.config import CfgNode as CN
 from detectron2.structures import Boxes, ImageList, Instances
 from detectron2.modeling import ROI_HEADS_REGISTRY, ROIHeads
 
-from detectron2.modeling.backbone.resnet import BottleneckBlock, ResNet
 from detectron2.modeling.poolers import ROIPooler
-from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers
-from detectron2.modeling.roi_heads.mask_head import build_mask_head
 from detectron2.modeling.roi_heads.box_head import build_box_head
+from detectron2.modeling.roi_heads.mask_head import build_mask_head
+from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers
 from detectron2.modeling.roi_heads.roi_heads import select_foreground_proposals
 
 from cancer_head_fpn_conv import build_cancer_head
 
 @ROI_HEADS_REGISTRY.register()
 class CBMStandardROIHeads(ROIHeads):
-    """
-    It's "standard" in a sense that there is no ROI transform sharing
-    or feature sharing between tasks.
-    Each head independently processes the input features by each head's
-    own pooler and head.
-
-    This class is used by most models, such as FPN and C5.
-    To implement more models, you can subclass it and implement a different
-    :meth:`forward()` or a head.
-    """
-
     @configurable
     def __init__(
         self,
@@ -52,6 +42,8 @@ class CBMStandardROIHeads(ROIHeads):
         NOTE: this interface is experimental.
 
         Args:
+            cancer_head (nn.Module): transform features to make malignancy predictions
+            cancer_on (bool): whether or not to train cancer (True) or only the concepts (False)
             box_in_features (list[str]): list of feature names to use for the box head.
             box_pooler (ROIPooler): pooler to extra region features for box head
             box_head (nn.Module): transform features to make box predictions
@@ -87,25 +79,19 @@ class CBMStandardROIHeads(ROIHeads):
         self.num_base_classes = 1 # lesion class
 
     @classmethod
-    def from_config(cls, cfg, input_shape):
+    def from_config(cls, cfg: CN, input_shape: ShapeSpec):
         ret = super().from_config(cfg)
         ret["train_on_pred_boxes"] = cfg.MODEL.ROI_BOX_HEAD.TRAIN_ON_PRED_BOXES
         ret['cancer_on'] = cfg.MODEL.CBM.CANCER_ON 
-        # Subclasses that have not been updated to use from_config style construction
-        # may have overridden _init_*_head methods. In this case, those overridden methods
-        # will not be classmethods and we need to avoid trying to call them here.
-        # We test for this with ismethod which only returns True for bound methods of cls.
-        # Such subclasses will need to handle calling their overridden _init_*_head methods.
         if inspect.ismethod(cls._init_box_head):
             ret.update(cls._init_box_head(cfg, input_shape))
         if inspect.ismethod(cls._init_mask_head):
             ret.update(cls._init_mask_head(cfg, input_shape))
-        
         ret.update(cls._init_cancer_head(cfg, input_shape))
         return ret
 
     @classmethod
-    def _init_box_head(cls, cfg, input_shape):
+    def _init_box_head(cls, cfg: CN, input_shape: ShapeSpec):
         # fmt: off
         in_features       = cfg.MODEL.ROI_HEADS.IN_FEATURES
         pooler_resolution = cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION
@@ -142,7 +128,7 @@ class CBMStandardROIHeads(ROIHeads):
         }
 
     @classmethod
-    def _init_mask_head(cls, cfg, input_shape):
+    def _init_mask_head(cls, cfg: CN, input_shape: ShapeSpec):
         if not cfg.MODEL.MASK_ON:
             return {}
         # fmt: off
@@ -176,7 +162,7 @@ class CBMStandardROIHeads(ROIHeads):
         return ret
 
     @classmethod
-    def _init_cancer_head(cls, cfg, input_shape):
+    def _init_cancer_head(cls, cfg: CN, input_shape: ShapeSpec):
         # fmt: off
         in_features       = cfg.MODEL.ROI_HEADS.IN_FEATURES
         pooler_resolution = cfg.MODEL.ROI_MASK_HEAD.POOLER_RESOLUTION
@@ -201,8 +187,7 @@ class CBMStandardROIHeads(ROIHeads):
         images: ImageList,
         features: Dict[str, torch.Tensor],
         proposals: List[Instances],
-        targets: Optional[List[Instances]] = None,
-    ) -> Tuple[List[Instances], Dict[str, torch.Tensor]]:
+        targets: Optional[List[Instances]] = None,):
         """
         See :class:`ROIHeads.forward`.
         """
@@ -227,9 +212,7 @@ class CBMStandardROIHeads(ROIHeads):
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
 
-    def forward_with_given_boxes(
-        self, features: Dict[str, torch.Tensor], instances: List[Instances]
-    ) -> List[Instances]:
+    def forward_with_given_boxes(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
         Use the given boxes in `instances` to produce other (non-box) per-ROI outputs.
 
@@ -341,13 +324,6 @@ class CBMStandardROIHeads(ROIHeads):
         if self.training:
             # head is only trained on positive proposals.
             instances, _ = select_foreground_proposals(instances, self.num_base_classes)
-            # for instances_per_image in instances:
-            #     if len(instances_per_image) == 0:
-            #         continue
-
-            #     # loop through the concepts and add their GTs to a dictionary of lists
-            #     for x in ['gt_margins', 'gt_orients']:
-            #         gt_concepts_per_image = instances_per_image.get(x).to(dtype=torch.float32)
             
         if self.mask_pooler is not None:
             features = [features[f] for f in self.mask_in_features]

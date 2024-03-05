@@ -1,19 +1,39 @@
-import cv2
+# Most code in this file is taken from detectron2.Visualizer, adapted for our purposes
+# All credit for unmodified code and structure goes to the original authors.  
 import torch
-from detectron2.utils.visualizer import Visualizer, ColorMode, GenericMask
-from detectron2.structures import Boxes, pairwise_iou, BoxMode
-import matplotlib.colors as mplc
 import random
 import numpy as np
+import matplotlib.colors as mplc
+from typing import Dict, List, Optional, Any, Tuple
+
+from detectron2.structures import BoxMode, Instances
+from detectron2.utils.visualizer import Visualizer, ColorMode, GenericMask
 
 class MyVisualizer(Visualizer):
-    def __init__(self, img_rgb, metadata=None, scale=1.0, instance_mode=ColorMode.IMAGE, show_lesion=True, plain_cancer=False):
+    def __init__(self, img_rgb: np.ndarray,
+                  metadata = None, 
+                  scale: float = 1.0, 
+                  instance_mode: ColorMode = ColorMode.IMAGE, 
+                  show_lesion: bool = True, plain_cancer: bool = False):
+        """
+        Initializes the MyVisualizer class.
+
+        Args:
+            img_rgb: RGB image data.
+            metadata: Metadata of the image.
+            scale: Scaling factor.
+            instance_mode: Instance mode for visualization.
+            show_lesion: Whether to show only lesions.
+            plain_cancer: Whether to show only plain cancer.
+        """
         super().__init__(img_rgb, metadata, scale, instance_mode)
+        # if we're showing the objectness scores for the lesion class
         self.show_lesion = show_lesion
+        # if we're only showing cancer prediction, not concept prediction 
         self.plain_cancer = plain_cancer
         
     # overloaded method from detectron2 (adding in the new BIRADS attributes)
-    def draw_dataset_dict(self, dic):
+    def draw_dataset_dict(self, dic: Dict):
         """
         Draw annotations/segmentaions in Detectron2 Dataset format.
 
@@ -43,7 +63,8 @@ class MyVisualizer(Visualizer):
             colors = ["yellow", "green", "pink"]
             
             category_ids = [x["category_id"] for x in annos]
-                
+            
+            # HARD-CODED VALUES, NEED TO CHANGE WITH YOUR IMPLEMENTATION
             cancers = [None if ("region_cancer" not in obj or obj["region_cancer"] is None) else int(obj["region_cancer"]) for obj in annos]
             shapes = [None if ("region_shape" not in obj or obj["region_shape"] is None) else int(obj["region_shape"]) for obj in annos]
             orient = [None if ("region_orientation" not in obj or obj["region_orientation"] is None) else int(obj["region_orientation"]) for obj in annos]
@@ -52,9 +73,8 @@ class MyVisualizer(Visualizer):
             posterior =  [None if ("region_posterior" not in obj or obj["region_posterior"] is None) else int(obj["region_posterior"]) for obj in annos]
 
             # All annos/fields which we don't have are all lists of Nones in the above list 
-
-            class_to_color = {0.0 : 'green', 1.0 : 'yellow'}
             
+            # HARD-CODED VALUES, NEED TO CHANGE WITH YOUR IMPLEMENTATION
             names = self.metadata.get("thing_classes", None)
             shape_names = self.metadata.get("shape_classes", None)
             orient_names = self.metadata.get("orientation_classes", None)
@@ -62,7 +82,6 @@ class MyVisualizer(Visualizer):
             posterior_names = self.metadata.get("posterior_classes", None)
             echo_names = self.metadata.get("echo_classes", None)
             cancer_names = self.metadata.get("cancer_classes", None)
-
 
             # show_lesion should be true whenever we're trying to look at the lesion only model 
             if self.show_lesion:
@@ -99,22 +118,16 @@ class MyVisualizer(Visualizer):
                 full_cats.append(echo)
                 full_names.append(echo_names)
 
-
             if self._instance_mode == ColorMode.IMAGE and self.metadata.get("thing_colors"):
                 colors = [
                     self.metadata.thing_colors[c] for c in cancers
                 ]
-
-            # print(self._instance_mode)
-            # print(self.metadata)
-            # print(colors)
         
             if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
                 colors = [
                     (self._jitter([x / 255 for x in self.metadata.thing_colors[c]]))
                     for c in cancers
                 ]
-
 
             labels = _create_group_text_labels(
                 full_cats,
@@ -129,11 +142,9 @@ class MyVisualizer(Visualizer):
 
         return self.output
     
-        # overloaded method from detectron2 (adding in the new BIRADS attributes)
-    
-    def draw_dataset_instances(self, instances):
+    def draw_dataset_instances(self, instances: Instances):
         """
-        Draw annotations/segmentaions in Detectron2 Dataset format.
+        Draw annotations/segmentations in Detectron2 Dataset format.
 
         Args:
             dic (dict): annotation/segmentation data of one image, in Detectron2 Dataset format.
@@ -229,7 +240,7 @@ class MyVisualizer(Visualizer):
 
         return self.output
 
-    def draw_instance_predictions(self, predictions):
+    def draw_instance_predictions(self, predictions: Instances):
         """
         Draw instance-level prediction results on an image.
         Args:
@@ -330,13 +341,13 @@ class MyVisualizer(Visualizer):
     
     def draw_text(
         self,
-        text,
-        position,
+        text: str,
+        position: Tuple[float, float],
         *,
-        font_size=None,
-        color="g",
-        horizontal_alignment="center",
-        rotation=0,
+        font_size: Optional[int] = None,
+        color: str = "g",
+        horizontal_alignment: str = "center",
+        rotation: int = 0,
     ):
         """
         Args:
@@ -378,18 +389,15 @@ class MyVisualizer(Visualizer):
         )
         return self.output
     
-def remove_nones_from_list(list_w_possible_nones):
+def remove_nones_from_list(list_w_possible_nones: List[Optional[Any]]):
     new_lst = [item for item in list_w_possible_nones if item is not None]
     return new_lst
 
-def _create_group_text_labels(classes, scores, class_names, is_crowd=None):
+def _create_group_text_labels(classes: List[List[Optional[int]]], 
+                              scores: List[List[Optional[float]]], 
+                              class_names: List[List[Optional[str]]], 
+                              is_crowd: Optional[List[List[Optional[bool]]]] = None):
     """
-    Args:
-        classes (list[list[int]] or None):
-        scores (list[list[float]] or None):
-        class_names (list[list[str]] or None):
-        is_crowd (list[list[bool]] or None):
-
     Returns:
         list[str] or None
     """
@@ -419,14 +427,11 @@ def _create_group_text_labels(classes, scores, class_names, is_crowd=None):
 
     return complete_labels
 
-def _create_text_labels(classes, scores, class_names, is_crowd=None):
+def _create_text_labels(classes: List[Optional[int]], 
+                        scores: List[Optional[float]], 
+                        
+                        class_names: List[Optional[str]], is_crowd: Optional[List[Optional[bool]]] = None):
     """
-    Args:
-        classes (list[int] or None):
-        scores (list[float] or None):
-        class_names (list[str] or None):
-        is_crowd (list[bool] or None):
-
     Returns:
         list[str] or None
     """

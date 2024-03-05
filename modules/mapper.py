@@ -1,41 +1,26 @@
-import cv2
+# Most code in this file is taken from detectron2.DatasetMapper, adapted for our purposes
+# All credit for unmodified code and structure goes to the original authors.  
 import copy
-from PIL import Image, ImageDraw, ImageFilter
-import pandas as pd
+import torch
 import numpy as np
-from skimage import draw, measure
-import scipy
-import random
-import detectron2.data.transforms as T
-import torch
-from detectron2.utils.visualizer import Visualizer, ColorMode
-from detectron2.structures import Boxes, pairwise_iou, BoxMode
-from detectron2.data import detection_utils as utils
-from detectron2.data import MetadataCatalog, DatasetCatalog, DatasetMapper
-
-from typing import List, Union
-import pycocotools.mask as mask_util
 from collections import defaultdict
-import torch
-from PIL import Image
+from typing import List, Dict, Tuple, Any
 
-from detectron2.structures import (
-    BitMasks,
-    Boxes,
-    BoxMode,
-    Instances,
-    Keypoints,
-    PolygonMasks,
-    RotatedBoxes,
-    polygons_to_bitmask,
-)
+from skimage import measure
+from PIL import Image, ImageDraw
+import pycocotools.mask as mask_util
 
+import detectron2.data.transforms as T
+from detectron2.data import DatasetMapper
+from detectron2.data import detection_utils as utils
+from detectron2.structures import Boxes, BoxMode, BitMasks, Instances, Keypoints, PolygonMasks, polygons_to_bitmask
+
+# standard datasetmapper from Detectron2, small modifications to allow for computation of validation loss in training loop 
 class ValidationMapper(DatasetMapper):
     def __init__(self, cfg, is_train=True, **kwargs):
         super().__init__(cfg, is_train, **kwargs)
         if cfg.INPUT.CROP.ENABLED and is_train:
             self.crop_gen = T.RandomCrop(cfg.INPUT.CROP.TYPE, cfg.INPUT.CROP.SIZE)
-            # logging.getLogger(__name__).info("CropGen used in training: " + str(self.crop_gen))
         else:
             self.crop_gen = None
 
@@ -107,11 +92,6 @@ class ValidationMapper(DatasetMapper):
                 dataset_dict, image_shape, transforms, self.min_box_side_len, self.proposal_topk
             )
 
-        # if not self.is_train:
-        #     # dataset_dict.pop("annotations", None)
-        #     dataset_dict.pop("sem_seg_file_name", None)
-        #     return dataset_dict
-
         if "annotations" in dataset_dict:
             # USER: Modify this if you want to keep them for some reason.
             for anno in dataset_dict["annotations"]:
@@ -138,7 +118,8 @@ class ValidationMapper(DatasetMapper):
 
         return dataset_dict
 
-def annotations_to_instances(annos, image_size, mask_format="polygon"):
+# HARD-CODED CONCEPT NAMES NEED TO CHANGE IN YOUR IMPLEMENTATION
+def annotations_to_instances(annos: List[Dict], image_size: Tuple[int, int], mask_format: str = "polygon"):
     """
     Create an :class:`Instances` object used by the models,
     from instance annotations in the dataset dict.
@@ -154,6 +135,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
             "gt_masks", "gt_keypoints", if they can be obtained from `annos`.
             This is the format that builtin models expect.
     """
+    # convert bboxes out of COCO format into the format Detectron2 expects 
     boxes = (
         np.stack(
             [BoxMode.convert(obj["bbox"], obj["bbox_mode"], BoxMode.XYXY_ABS) for obj in annos]
@@ -168,6 +150,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
     classes = torch.tensor(classes, dtype=torch.int64)
     target.gt_classes = classes
     
+    # add concepts to the ground truth annotations 
     if len(annos):
         if "region_shape" in annos[0]:
             shapes = [None if obj["region_shape"] is None else int(obj["region_shape"]) for obj in annos]
@@ -219,7 +202,7 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
         posts = torch.tensor([], dtype=torch.int64)
         target.gt_posts = posts
     
-
+    # convert segmentation mask-style annotations to Detectron2 format 
     if len(annos) and "segmentation" in annos[0]:
         segms = [obj["segmentation"] for obj in annos]
         if mask_format == "polygon":
@@ -258,77 +241,16 @@ def annotations_to_instances(annos, image_size, mask_format="polygon"):
             )
         target.gt_masks = masks
 
-    if len(annos) and "keypoints" in annos[0]:
-        kpts = [obj.get("keypoints", []) for obj in annos]
-        target.gt_keypoints = Keypoints(kpts)
-
     return target
-
-def close_contour(contour):
-    if not np.array_equal(contour[0], contour[-1]):
-        contour = np.vstack((contour, contour[0]))
-    return contour
-
-def binary_mask_to_polygon(binary_mask, tolerance=0):
-    """Converts a binary mask to COCO polygon representation
-    Args:
-        binary_mask: a 2D binary numpy array where '1's represent the object
-        tolerance: Maximum distance from original points of polygon to approximated
-            polygonal chain. If tolerance is 0, the original coordinate array is returned.
-    """
-    polygons = []
-    # pad mask to close contours of shapes which start and end at an edge
-    # padded_binary_mask = np.pad(binary_mask, pad_width=1, mode='constant', constant_values=0)
-    contours = measure.find_contours(binary_mask)
-    contours = np.subtract(contours, 1, dtype=object)
-    for contour in contours:
-        contour = close_contour(contour)
-        contour = measure.approximate_polygon(contour, tolerance)
-        contour = np.flip(contour, axis=1)
-        segmentation = contour.ravel().tolist()
-        # after padding and subtracting 1 we may get -0.5 points in our segmentation 
-        segmentation = [0 if i < 0 else i for i in segmentation]
-        min_x = min(segmentation[::2])
-        min_y = min(segmentation[1::2])
-        width = max(segmentation[::2]) - min_x
-        height = max(segmentation[1::2]) - min_y
-        polygons.append([segmentation, min_x, min_y, width, height])
-
-    return polygons
-
-def find_closest_bbox(bbox_list_1, bbox_list_2):
-    sorted_order = []
-    sorted_errors = []
-    
-    # for every bbox in the first list provided
-    for x in list(range(len(bbox_list_1))):
-        box1 = bbox_list_1[x]
-        errors = []
-        
-        for y in list(range(len(bbox_list_2))):
-            box2 = bbox_list_2[y]
-            
-            error = sum([abs(res1 - res2) for (res1, res2) in zip(box1, box2)])
-            errors.append(error)
-         
-        sorted_order.append(np.argmin(errors))
-        sorted_errors.append(np.min(errors))
-        
-    if (len(sorted_order) > len(bbox_list_2)):
-        while len(sorted_order) > len(bbox_list_2):
-            remove = np.argmin(sorted_errors)
-            sorted_errors.pop(remove)
-            sorted_order.pop(remove)
-            bbox_list_1.pop(remove)
-        
-    return sorted_order, bbox_list_1
 
 class CustomMapper(DatasetMapper):
     def __init__(self, cfg, is_train: bool = True, augmentations: List = [], **kwargs):
         super().__init__(cfg, is_train, **kwargs)
+
         self.is_train = is_train
-        self.mode = "training" if is_train else "inference"
         self.augmentations = augmentations
+        self.mode = "training" if is_train else "inference"
+        
         try:
             self.fields = cfg.MODEL.CBM.CONCEPTS
         except AttributeError:
@@ -342,36 +264,20 @@ class CustomMapper(DatasetMapper):
         self.proposal_topk          = None
         self.recompute_boxes        = False
 
-    def __call__(self, dataset_dict):
+    def __call__(self, dataset_dict: Dict[str, Any]):
         # making a copy of the dataset instance we're being passed into this function 
         dataset_dict = copy.deepcopy(dataset_dict)
-        
-        img = Image.new('L', (int(dataset_dict['width']), int(dataset_dict['height'])), 0)
-        segmentation = [x['segmentation'][0] for x in dataset_dict['annotations']]
-        for x in segmentation:
-            seg = [int(y) for y in x]
-            ImageDraw.Draw(img).polygon(seg, outline=1, fill=1)
-        mask = np.array(img)
             
         # reading in the image using the Detectron2 method, instead of OpenCV
         image = utils.read_image(dataset_dict["file_name"], format="BGR")
-
-        num_lesions = len(dataset_dict['annotations'])
         
         for x, y in zip(dataset_dict['annotations'], dataset_dict['annotations'][1:]):
             if np.all(x == y):
                 dataset_dict['annotations'].remove(x)
-                
-        # Reformatting bounding boxes and categories to play nice with albumentations 
-        bboxes = [x['bbox'] for x in dataset_dict['annotations']]
 
-        # Defining our augmentations for training, using the albumentations library here for future-proofing, in case we want to 
-        # add copy-paste or another more complex augmentation than Detectron2 allows for. 
-        #print(dataset_dict['annotations'])
+        # Defining our augmentations for training
         if (self.mode == 'training'):
-            # REDUNDANCY IN FLIPPING 
             augmentations = T.AugmentationList(self.augmentations)
-        
         else:
             augmentations = T.AugmentationList([])
             
@@ -380,6 +286,7 @@ class CustomMapper(DatasetMapper):
         category_ids = [x['category_id'] for x in dataset_dict['annotations']]
         region_cancer = [x['region_cancer'] for x in dataset_dict['annotations']]
 
+        # HARD-CODED VALUES NEED TO CHANGE WITH YOUR IMPLEMENTATION 
         if 'shape' in self.fields:
             region_shape = [x['region_shape'] for x in dataset_dict['annotations']]
             concept_kwargs['region_shapes'] = region_shape
@@ -405,18 +312,17 @@ class CustomMapper(DatasetMapper):
 
         aug_input = T.AugInput(image, sem_seg=None)
         transforms = augmentations(aug_input)
-        image, sem_seg_gt = aug_input.image, aug_input.sem_seg
+        image, _ = aug_input.image, aug_input.sem_seg
         dataset_dict["image"] = torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
         
         image_shape = image.shape[:2]
 
         if "annotations" in dataset_dict:
             self._transform_annotations(dataset_dict, transforms, image_shape)
-            
         
         return dataset_dict
     
-    def _transform_annotations(self, dataset_dict, transforms, image_shape):
+    def _transform_annotations(self, dataset_dict: Dict[str, Any], transforms: T.AugmentationList, image_shape: Tuple[int, int]):
         # USER: Modify this if you want to keep them for some reason.
         for anno in dataset_dict["annotations"]:
             if not self.use_instance_mask:

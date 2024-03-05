@@ -1,182 +1,32 @@
-from detectron2.evaluation import COCOEvaluator
-import contextlib
-import copy
-import io
-import itertools
-import json
-import shutil
-import logging
-import time
-import numpy as np
-import os
-import pickle
-import datetime
+# Most code in this file is taken from detectron2.COCOEvaluator and pycocotools COCOeval, adapted for our purposes
+# All credit for unmodified code and structure goes to the original authors.  
 from collections import OrderedDict
-import pycocotools.mask as mask_util
 from iopath.common.file_io import file_lock
-from detectron2 import model_zoo
+import io, os, time, shutil, json, copy, datetime, itertools, contextlib, logging
+
 import torch
+import numpy as np
+
 from pycocotools.coco import COCO
-from detectron2.config import CfgNode as CN, get_cfg
+import pycocotools.mask as mask_util
 from pycocotools.cocoeval import COCOeval
-from tabulate import tabulate
+
 from confidenceinterval import roc_auc_score
-from detectron2.checkpoint import DetectionCheckpointer
 
 import detectron2.utils.comm as comm
-from detectron2.config import CfgNode
 from detectron2.data import MetadataCatalog
-from detectron2.structures import Boxes, BoxMode, pairwise_iou, RotatedBoxes, PolygonMasks
+from detectron2.evaluation import COCOEvaluator
 from detectron2.utils.file_io import PathManager
-from detectron2.utils.logger import create_small_table
-
 from detectron2.data.catalog import DatasetCatalog, MetadataCatalog
-from config import add_cbm_config, add_uhcc_config
-from detectron2.modeling import build_model
+from detectron2.structures import Boxes, BoxMode,  RotatedBoxes, PolygonMasks, Instances
+
 COCOeval_opt = COCOeval
+logger = logging.getLogger(__name__)
 
 # for minimal -> sigmoid(0.05) = 0.5125 (1), sigmoid(-0.05) = 0.4875 (0)
 # for maximal - sigmoid(4.625) = 0.9903 (1), sigmoid(-4.625) = 0.0097 (0)
 
-CORRECTION = 0.0
-MODEL = 'linear' # should be one of linear, nonlinear, or sidechannel
-FINAL_OUTPUT_VAR = 'cancer'
-
-logger = logging.getLogger(__name__)
-
-side_features = dict()
-def getSideChannelActivation(name=None):
-    # the hook signature
-    def hook(model, input, output):
-        side_features['pred_side'] = output.detach().cpu()
-    return hook
-
-concept_features = dict()
-def getConceptActivation(name=None):
-    # the hook signature
-    def hook(model, input, output):
-        concept_features['pred_concepts'] = output.detach().cpu()
-    return hook
-
-
-def load_in_model():
-    if MODEL == 'nonlinear':
-        cfg1 = get_cfg()
-        cfg1.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"))
-        add_uhcc_config(cfg1)
-        add_cbm_config(cfg1)
-        cfg1.merge_from_file("/raid/srl/makawalu_2021-11-03/abunnell/CBM/trial_21_lesion_only_2-14-24.yaml")
-
-        cfg1.MODEL.CBM.CANCER_ON = True
-        cfg1.MODEL.CBM.SIDE_CHANNEL = False
-
-        # best lesion model from optuna runs 
-        # cfg1.MODEL.WEIGHTS = '/raid/srl/makawalu_2021-11-03/abunnell/CBM/output/concepts_frozen_backbone_2-8-24/cbm_concepts_optuna_18.pth'
-
-        cfg1.SOLVER.CHECKPOINT_PERIOD = 500
-        cfg1.SOLVER.MAX_ITER = 10000
-        cfg1.MODEL.ROI_HEADS.NUM_CLASSES = 1
-        cfg1.DATALOADER.FILTER_EMPTY_ANNOTATIONS = True
-
-        cfg1.SOLVER.MOMENTUM = 0.4
-        cfg1.MODEL.ROI_CANCER_HEAD.NUM_FC = 2048
-        cfg1.SOLVER.STEPS = (15000, )
-        cfg1.SOLVER.BASE_LR = 0.004
-
-        # whether or not to train with sigmoid in intermediate layer
-        cfg1.MODEL.CBM.USE_SIGMOID = 1
-
-        # number of convolutional layers for the concepts
-        cfg1.MODEL.ROI_CANCER_HEAD.NUM_CONV = (128, 128)
-
-        model1 = build_model(cfg1)
-        DetectionCheckpointer(model1).load("/raid/srl/makawalu_2021-11-03/abunnell/CBM/output/cancer_no_side_channel_2-16-24/cbm_cancer_no_side_channel_optuna_1.pth")
-
-        return cfg1, model1.eval()#.cpu()
-    
-    elif MODEL == 'sidechannel':
-        cfg2 = get_cfg()
-        cfg2.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"))
-        add_uhcc_config(cfg2)
-        add_cbm_config(cfg2)
-        cfg2.merge_from_file("/raid/srl/makawalu_2021-11-03/abunnell/CBM/trial_21_lesion_only_2-14-24.yaml")
-
-        cfg2.MODEL.CBM.CANCER_ON = True
-        cfg2.MODEL.CBM.SIDE_CHANNEL = True
-
-        cfg2.SOLVER.CHECKPOINT_PERIOD = 500
-        cfg2.SOLVER.MAX_ITER = 10000
-        cfg2.MODEL.ROI_HEADS.NUM_CLASSES = 1
-        cfg2.DATALOADER.FILTER_EMPTY_ANNOTATIONS = True
-
-        cfg2.SOLVER.MOMENTUM = 0.1
-        cfg2.MODEL.ROI_CANCER_HEAD.NUM_FC = 2048
-        cfg2.SOLVER.STEPS = (15000, )
-        cfg2.SOLVER.BASE_LR = 0.005
-
-        # whether or not to train with sigmoid in intermediate layer
-        cfg2.MODEL.CBM.USE_SIGMOID = 1
-
-        # number of convolutional layers for the concepts
-        cfg2.MODEL.ROI_CANCER_HEAD.NUM_CONV = (128, 128)
-
-        # random crop prop = 0.2
-        #cfg1.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.6
-        cfg2.TEST.DETECTIONS_PER_IMAGE = 4
-
-        cfg2.DATASETS.TEST = ('validation',)
-
-        model2 = build_model(cfg2)
-        DetectionCheckpointer(model2).load("/raid/srl/makawalu_2021-11-03/abunnell/CBM/output/cancer_side_channel_2-17-24/cbm_cancer_no_side_channel_optuna_16.pth")
-
-        h1 = model2.roi_heads.cancer_head.transfer_side[2].register_forward_hook(getSideChannelActivation())
-
-        return cfg2, model2.eval()#.cpu()
-    
-    elif MODEL == 'linear':
-        cfg3 = get_cfg()
-        cfg3.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"))
-        add_uhcc_config(cfg3)
-        add_cbm_config(cfg3)
-        cfg3.merge_from_file("/raid/srl/makawalu_2021-11-03/abunnell/CBM/trial_21_lesion_only_2-14-24.yaml")
-
-        cfg3.MODEL.CBM.CANCER_ON = True
-        cfg3.MODEL.CBM.SIDE_CHANNEL = False
-        cfg3.MODEL.CBM.LINEAR = True
-
-        # best lesion model from optuna runs 
-        # cfg1.MODEL.WEIGHTS = '/raid/srl/makawalu_2021-11-03/abunnell/CBM/output/concepts_frozen_backbone_2-8-24/cbm_concepts_optuna_18.pth'
-
-        cfg3.SOLVER.CHECKPOINT_PERIOD = 500
-        cfg3.SOLVER.MAX_ITER = 10000
-        cfg3.MODEL.ROI_HEADS.NUM_CLASSES = 1
-        cfg3.DATALOADER.FILTER_EMPTY_ANNOTATIONS = True
-
-        cfg3.SOLVER.MOMENTUM = 0.4
-        cfg3.MODEL.ROI_CANCER_HEAD.NUM_FC = 2048
-        cfg3.SOLVER.STEPS = (15000, )
-        cfg3.SOLVER.BASE_LR = 0.004
-
-        # whether or not to train with sigmoid in intermediate layer
-        cfg3.MODEL.CBM.USE_SIGMOID = 1
-
-        # number of convolutional layers for the concepts
-        cfg3.MODEL.ROI_CANCER_HEAD.NUM_CONV = (128, 128)
-
-        # random crop prop = 0.2
-        #cfg1.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.6
-        cfg3.TEST.DETECTIONS_PER_IMAGE = 4
-
-        cfg3.DATASETS.TEST = ('validation',)
-
-        model3 = build_model(cfg3)
-        DetectionCheckpointer(model3).load("/raid/srl/makawalu_2021-11-03/abunnell/CBM/output/cancer_linear_2-20-24/model_final.pth")
-
-        return cfg3, model3.eval()#.cpu()
-
-    else: raise ValueError('Nonexistent model specified')
-
-def instances_to_coco_json(instances, img_id):
+def instances_to_coco_json(instances: Instances, img_id: int):
     """
     Dump an "Instances" object to a COCO-format json that's used for evaluation.
 
@@ -190,7 +40,8 @@ def instances_to_coco_json(instances, img_id):
     num_instance = len(instances)
     if num_instance == 0:
         return []
-
+    
+    # get boxes and convert them to the form COCO expects 
     boxes = instances.pred_boxes.tensor.numpy()
     boxes = BoxMode.convert(boxes, BoxMode.XYXY_ABS, BoxMode.XYWH_ABS)
     boxes = boxes.tolist()
@@ -647,9 +498,6 @@ class CBMCOCOeval(COCOevalMaxDets):
         concept_auc_results = dict()
         for concept_gt_name in self.concept_mapping.keys():
             concept_auc_results[concept_gt_name] = -np.ones((T,K,A,M))
-        if CORRECTION > 0:
-            concept_auc_results['correction'] = -np.ones((T,K,A,M))
-            model, cfg = load_in_model()
 
         # create dictionary for future indexing
         _pe = self._paramsEval
@@ -716,21 +564,6 @@ class CBMCOCOeval(COCOevalMaxDets):
                                 detections = dtm_concepts[concept_gt_name][t, :][tps[t, :]]
                                 truths = gtm_concepts[concept_gt_name][t, :][tps[t, :]]
                                 concept_auc_results[concept_gt_name][t,k,a,m] = self.computeAUROC(concept_gt_name, maxDet, t, np.ravel(detections), np.ravel(truths))
-                            
-                            # if CORRECTION > 0:
-                            #     detections = dtm_concepts[FINAL_OUTPUT_VAR][t, :][tps[t, :]]
-                            #     truths = gtm_concepts[FINAL_OUTPUT_VAR][t, :][tps[t, :]]
-                            #     images = 
-                            #     # number of examples x number of concepts leading to final prediction
-                            #     predicted_concepts = -np.ones((len(detections), len(self.concept_mapping.keys())))
-                            #     true_concepts = -np.ones((len(detections), len(self.concept_mapping.keys())))
-                            #     # IMPORTANT need to define concept order
-                            #     for i, x in enumerate(cfg.MODEL.CBM.CONCEPTS):
-                            #         predicted_concepts[:, i] = dtm_concepts[x][t, :][tps[t, :]]
-                            #         true_concepts[:, i] = gtm_concepts[x][t, :][tps[t, :]]
-                                
-                            #     concept_auc_results['correction'][t,k,a,m] = self.computeCorrectedAUROC(model, cfg, maxDet, t, predicted_concepts, true_concepts, np.ravel(detections), np.ravel(truths), np.ravel(image_ids))
-                               
 
                                 
         self.eval = {
@@ -811,49 +644,7 @@ class CBMCOCOeval(COCOevalMaxDets):
             print(dt_concepts)
             print(gt_concepts)
             auc = -1
-        return auc
-
-    def computeCorrectedAUROC(self, model, config, max_dets, thresh, dt_intermediate_concepts, gt_intermediate_concepts, dt_concepts, gt_concepts, images):
-        # getting intermediate predicted concepts
-        # -np.ones((len(detections), len(self.concept_mapping.keys())))
-        pred_intermediate_concepts = np.where(dt_intermediate_concepts > 0.5, 0, 1)
-        corr_intermediate_concepts = np.where(gt_intermediate_concepts == 0, 1 - CORRECTION, CORRECTION)
-        corrected_preds = np.where(pred_intermediate_concepts == gt_intermediate_concepts, pred_intermediate_concepts, corr_intermediate_concepts)
-
-        if CORRECTION > 0 and MODEL in ['linear', 'nonlinear', 'sidechannel']:
-            pass
-        else: raise AssertionError('Incompatible MODEL and CORRECTION values')
-
-        # if we need to get logits or side channel values from the model
-        if (MODEL == 'sidechannel') or (not config.MODEL.CBM.USE_SIGMOID):
-            # store our side channel activations
-            if MODEL == 'sidechannel':
-                side_channel_activations = -np.ones(len(dt_concepts))
-
-            for i, img in enumerate(images):
-                temp = [{'file_name': 'temp.png', 'height': img.shape[1], 
-                         'width': img.shape[2], 'image_id': 1, 'image' : img}]
-                pred = model(temp)
-                for j in len(pred[0]['instances']):
-                    # if were looking at the right detection
-                    if pred[0]['instances'][j].scores == dt_concepts[i]:
-                        # pull out the corresponding activation 
-                        if MODEL == 'sidechannel':
-                            side_channel_activations[i, :] = side_features['pred_side'][j]
-                        else:
-                            pass  
-
-        
-        model.roi_heads.cancer_head.second_model(corrections)
-        for i, corrections in enumerate(corrected_preds):
-            pass
-
-            
-
-                    
-                
-                    
-            
+        return auc        
 
 class CBMCOCOEvaluator(COCOEvaluator): 
     def __init__(self,
