@@ -1,0 +1,22 @@
+SOLVER:
+  MOMENTUM: 0.8
+  BASE_LR: 0.000006
+MODEL:
+  WEIGHTS: 'weights/stage_3b_weights.pth'
+  BACKBONE:
+    FREEZE_AT: 4
+  ROI_BOX_HEAD:
+    CLS_AGNOSTIC_BBOX_REG: True
+    NUM_FC: 3
+    NUM_CONV: 4
+  ROI_MASK_HEAD:
+    CLS_AGNOSTIC_MASK: True
+    NUM_CONV: 5
+  ROI_CANCER_HEAD: 
+    NUM_CONV: (512, 64)
+    NUM_FC: 512
+  CBM:
+    CANCER_ON: False
+    USE_SIGMOID: False
+    SIDE_CHANNEL: True
+VERSION: 2

@@ -1,0 +1,14 @@
+SOLVER:
+  MOMENTUM: 0.9
+MODEL:
+  WEIGHTS: 'weights/stage_1_weights.pth'
+  BACKBONE:
+    FREEZE_AT: 4
+  ROI_BOX_HEAD:
+    CLS_AGNOSTIC_BBOX_REG: True
+    NUM_FC: 3
+    NUM_CONV: 4
+  ROI_MASK_HEAD:
+    CLS_AGNOSTIC_MASK: True
+    NUM_CONV: 5
+VERSION: 2
