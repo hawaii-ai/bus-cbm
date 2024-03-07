@@ -16,7 +16,7 @@ MODEL:
     NUM_CONV: (512, 64)
     NUM_FC: 512
   CBM:
-    CANCER_ON: False
+    CANCER_ON: True
     USE_SIGMOID: False
     SIDE_CHANNEL: True
 VERSION: 2
