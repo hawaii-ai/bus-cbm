@@ -18,7 +18,7 @@ from detectron2.modeling.roi_heads.mask_head import build_mask_head
 from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers
 from detectron2.modeling.roi_heads.roi_heads import select_foreground_proposals
 
-from cancer_head_fpn_conv import build_cancer_head
+from .cancer_head_fpn_conv import build_cancer_head
 
 @ROI_HEADS_REGISTRY.register()
 class CBMStandardROIHeads(ROIHeads):
